@@ -18,7 +18,7 @@ jobs:
       - name: Run wellness bot
         uses: actions/github-script@v7
         env:
-          SLACK_WEBHOOK_URL: "${{ secrets.SLACK_WEBHOOK_URL }}"
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           BOT_ISSUE_NUMBER: "1"
         with:
           script: |
@@ -35,26 +35,24 @@ jobs:
             }
 
             function getKSTParts() {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: "Asia/Seoul",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true
-  }).formatToParts(new Date());
+              const parts = new Intl.DateTimeFormat("en-US", {
+                timeZone: "Asia/Seoul",
+                hour: "2-digit",
+                minute: "2-digit",
+                hour12: true
+              }).formatToParts(new Date());
 
-  const hour = parts.find(p => p.type === "hour").value;
-  const minute = parts.find(p => p.type === "minute").value;
-  const dayPeriod = parts.find(p => p.type === "dayPeriod").value.toUpperCase();
+              const hour = parts.find(p => p.type === "hour")?.value ?? "12";
+              const minute = parts.find(p => p.type === "minute")?.value ?? "00";
+              const dayPeriod = (parts.find(p => p.type === "dayPeriod")?.value ?? "AM").toUpperCase();
 
-  return { hour, minute, dayPeriod };
-}
+              return { hour, minute, dayPeriod };
+            }
 
-function format12hKST() {
-  const { hour, minute, dayPeriod } = getKSTParts();
-  return `${hour}:${minute} ${dayPeriod}`;
-}
-
-
+            function format12hKST() {
+              const { hour, minute, dayPeriod } = getKSTParts();
+              return `${hour}:${minute} ${dayPeriod}`;
+            }
 
             const STATE_START = "<!-- BOT_STATE_START -->";
             const STATE_END   = "<!-- BOT_STATE_END -->";
@@ -76,7 +74,7 @@ function format12hKST() {
                 if (typeof obj.enabled !== "boolean") return null;
                 if (typeof obj.sleepUntilEpochMs !== "number") return null;
                 return obj;
-              } catch {
+              } catch (e) {
                 return null;
               }
             }
@@ -195,6 +193,5 @@ function format12hKST() {
               return;
             }
 
-const msgTime = format12hKST();
-await postSlack(`🍀 ${msgTime}`);
-
+            const msgTime = format12hKST();
+            await postSlack(`🍀 ${msgTime}`);
