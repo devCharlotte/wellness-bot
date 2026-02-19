@@ -19,7 +19,7 @@ jobs:
         uses: actions/github-script@v7
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          BOT_ISSUE_NUMBER: "1"   
+          BOT_ISSUE_NUMBER: "1"
         with:
           script: |
             const slackWebhook = process.env.SLACK_WEBHOOK_URL;
@@ -56,10 +56,7 @@ jobs:
             const STATE_END   = "<!-- BOT_STATE_END -->";
 
             function defaultState() {
-              return {
-                enabled: true,
-                sleepUntilEpochMs: 0
-              };
+              return { enabled: true, sleepUntilEpochMs: 0 };
             }
 
             function extractState(body) {
@@ -75,7 +72,7 @@ jobs:
                 if (typeof obj.enabled !== "boolean") return null;
                 if (typeof obj.sleepUntilEpochMs !== "number") return null;
                 return obj;
-              } catch (e) {
+              } catch {
                 return null;
               }
             }
@@ -126,7 +123,6 @@ jobs:
               const body = (raw || "").trim();
               const lower = body.toLowerCase();
 
-              // enable / disable
               if (lower === "enable" || lower === "on") return { kind: "enable" };
               if (lower === "disable" || lower === "off") return { kind: "disable" };
 
@@ -143,7 +139,6 @@ jobs:
             }
 
             const kst = nowKST();
-            const minutes = kst.getMinutes();
 
             const issue = await getBotIssue();
             const currentBody = issue.body || "";
@@ -154,7 +149,7 @@ jobs:
               const cmd = parseCommand(commentBody);
 
               if (!cmd) {
-                core.info("No recognized command in comment. Supported: enable | disable | sleep 8h | sleep 30m");
+                core.info("No recognized command. Supported: enable | disable | sleep 8h | sleep 30m");
                 return;
               }
 
@@ -165,7 +160,7 @@ jobs:
                 state.enabled = false;
                 state.sleepUntilEpochMs = 0;
               } else if (cmd.kind === "sleep") {
-                state.enabled = true; 
+                state.enabled = true;
                 state.sleepUntilEpochMs = Date.now() + cmd.ms;
               }
 
@@ -179,9 +174,6 @@ jobs:
               await postSlack(`🍀 change status : enabled=${state.enabled}, sleepUntilEpochMs=${state.sleepUntilEpochMs}${untilText}`);
               return;
             }
-
-
-            const onTenMinuteBoundary = (minutes % 10 === 0);
 
             if (state.sleepUntilEpochMs > 0 && Date.now() >= state.sleepUntilEpochMs) {
               state.sleepUntilEpochMs = 0;
@@ -198,10 +190,6 @@ jobs:
             }
             if (sleeping) {
               core.info("Sleeping: skipping");
-              return;
-            }
-            if (!onTenMinuteBoundary) {
-              core.info("Not on 10-minute boundary: skipping");
               return;
             }
 
