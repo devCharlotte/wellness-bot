@@ -34,23 +34,27 @@ jobs:
               return;
             }
 
-            function nowKST() {
-              const s = new Intl.DateTimeFormat("sv-SE", {
-                timeZone: "Asia/Seoul",
-                year: "numeric", month: "2-digit", day: "2-digit",
-                hour: "2-digit", minute: "2-digit", second: "2-digit",
-                hour12: false
-              }).format(new Date());
-              return new Date(s.replace(" ", "T") + "+09:00");
-            }
+            function getKSTParts() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Seoul",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true
+  }).formatToParts(new Date());
 
-            function format12h(kstDate) {
-              const hh = kstDate.getHours();
-              const mm = String(kstDate.getMinutes()).padStart(2, "0");
-              const ampm = hh < 12 ? "AM" : "PM";
-              const h12 = ((hh + 11) % 12) + 1;
-              return `${String(h12).padStart(2, "0")}:${mm} ${ampm}`;
-            }
+  const hour = parts.find(p => p.type === "hour").value;
+  const minute = parts.find(p => p.type === "minute").value;
+  const dayPeriod = parts.find(p => p.type === "dayPeriod").value.toUpperCase();
+
+  return { hour, minute, dayPeriod };
+}
+
+function format12hKST() {
+  const { hour, minute, dayPeriod } = getKSTParts();
+  return `${hour}:${minute} ${dayPeriod}`;
+}
+
+
 
             const STATE_START = "<!-- BOT_STATE_START -->";
             const STATE_END   = "<!-- BOT_STATE_END -->";
@@ -138,8 +142,6 @@ jobs:
               return null;
             }
 
-            const kst = nowKST();
-
             const issue = await getBotIssue();
             const currentBody = issue.body || "";
             let state = extractState(currentBody) || defaultState();
@@ -193,5 +195,6 @@ jobs:
               return;
             }
 
-            const msgTime = format12h(kst);
-            await postSlack(`🍀 ${msgTime}`);
+const msgTime = format12hKST();
+await postSlack(`🍀 ${msgTime}`);
+
