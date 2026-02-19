@@ -4,226 +4,206 @@ on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch:
+  issue_comment
+    types: [created, edited]
 
 permissions:
-  issues: write
   contents: read
-
-env:
-  BOT_ISSUE_NUMBER: "1"   
+  issues: write
 
 jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Run bot (read issue comments, update state, send slack)
+      - name: Run wellness bot
         uses: actions/github-script@v7
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          BOT_ISSUE_NUMBER: "1"   
         with:
           script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const issue_number = parseInt(process.env.BOT_ISSUE_NUMBER, 10);
             const slackWebhook = process.env.SLACK_WEBHOOK_URL;
+            const botIssueNumber = Number(process.env.BOT_ISSUE_NUMBER);
 
-            function nowSeoulDate() {
-              const fmt = new Intl.DateTimeFormat('en-US', {
-                timeZone: 'Asia/Seoul',
-                year: 'numeric', month: '2-digit', day: '2-digit',
-                hour: '2-digit', minute: '2-digit', second: '2-digit',
+            if (!slackWebhook) {
+              core.setFailed("Missing secret SLACK_WEBHOOK_URL");
+              return;
+            }
+            if (!botIssueNumber || Number.isNaN(botIssueNumber)) {
+              core.setFailed("Invalid BOT_ISSUE_NUMBER");
+              return;
+            }
+
+            function nowKST() {
+              const s = new Intl.DateTimeFormat("sv-SE", {
+                timeZone: "Asia/Seoul",
+                year: "numeric", month: "2-digit", day: "2-digit",
+                hour: "2-digit", minute: "2-digit", second: "2-digit",
                 hour12: false
-              });
-              const parts = fmt.formatToParts(new Date());
-              const get = (type) => parts.find(p => p.type === type)?.value;
-              const y = parseInt(get('year'), 10);
-              const mo = parseInt(get('month'), 10);
-              const d = parseInt(get('day'), 10);
-              const hh = parseInt(get('hour'), 10);
-              const mm = parseInt(get('minute'), 10);
-              const ss = parseInt(get('second'), 10);
-              return { y, mo, d, hh, mm, ss };
+              }).format(new Date());
+              return new Date(s.replace(" ", "T") + "+09:00");
             }
 
-            function formatSeoul12h(hh, mm) {
-              const am = hh < 12;
-              let h12 = hh % 12;
-              if (h12 === 0) h12 = 12;
-              const hhStr = String(h12).padStart(2, '0');
-              const mmStr = String(mm).padStart(2, '0');
-              return `${hhStr}:${mmStr} ${am ? 'AM' : 'PM'}`;
+            function format12h(kstDate) {
+              const hh = kstDate.getHours();
+              const mm = String(kstDate.getMinutes()).padStart(2, "0");
+              const ampm = hh < 12 ? "AM" : "PM";
+              const h12 = ((hh + 11) % 12) + 1;
+              return `${String(h12).padStart(2, "0")}:${mm} ${ampm}`;
             }
 
-            function parseStateFromBody(body) {
-              const start = '<!--BOT_STATE-->';
-              const end = '<!--/BOT_STATE-->';
-              const i = body.indexOf(start);
-              const j = body.indexOf(end);
-              if (i === -1 || j === -1 || j <= i) {
-                return { enabled: true, sleepUntilMs: 0, lastProcessedCommentId: 0 };
-              }
-              const jsonText = body.slice(i + start.length, j).trim();
+            const STATE_START = "<!-- BOT_STATE_START -->";
+            const STATE_END   = "<!-- BOT_STATE_END -->";
+
+            function defaultState() {
+              return {
+                enabled: true,
+                sleepUntilEpochMs: 0
+              };
+            }
+
+            function extractState(body) {
+              const sIdx = body.indexOf(STATE_START);
+              const eIdx = body.indexOf(STATE_END);
+              if (sIdx === -1 || eIdx === -1 || eIdx <= sIdx) return null;
+
+              const jsonText = body.slice(sIdx + STATE_START.length, eIdx).trim();
+              if (!jsonText) return null;
+
               try {
-                const st = JSON.parse(jsonText);
-                return {
-                  enabled: !!st.enabled,
-                  sleepUntilMs: Number(st.sleepUntilMs || 0),
-                  lastProcessedCommentId: Number(st.lastProcessedCommentId || 0),
-                };
-              } catch {
-                return { enabled: true, sleepUntilMs: 0, lastProcessedCommentId: 0 };
+                const obj = JSON.parse(jsonText);
+                if (typeof obj.enabled !== "boolean") return null;
+                if (typeof obj.sleepUntilEpochMs !== "number") return null;
+                return obj;
+              } catch (e) {
+                return null;
               }
             }
 
-            function writeStateToBody(oldBody, state) {
-              const start = '<!--BOT_STATE-->';
-              const end = '<!--/BOT_STATE-->';
-              const json = JSON.stringify(state, null, 2);
-              const block = `${start}\n${json}\n${end}`;
+            function upsertState(body, stateObj) {
+              const block = `${STATE_START}\n${JSON.stringify(stateObj, null, 2)}\n${STATE_END}\n`;
+              const sIdx = body.indexOf(STATE_START);
+              const eIdx = body.indexOf(STATE_END);
 
-              if (!oldBody.includes(start) || !oldBody.includes(end)) {
-                const header =
-                  `# 🍀 Wellness Bot Control Issue\n\n` +
-                  `- enable\n` +
-                  `- disable\n` +
-                  `- sleep 8h (예: sleep 1h, sleep 12h)\n\n` +
-                return header + block + "\n";
+              if (sIdx === -1 || eIdx === -1 || eIdx <= sIdx) {
+                const sep = body.endsWith("\n") ? "" : "\n";
+                return body + sep + "\n" + block;
               }
-
-              const i = oldBody.indexOf(start);
-              const j = oldBody.indexOf(end);
-              return oldBody.slice(0, i) + block + oldBody.slice(j + end.length);
+              return body.slice(0, sIdx) + block + body.slice(eIdx + STATE_END.length);
             }
 
-            function parseCommand(text) {
-              const s = (text || '').trim().toLowerCase();
+            async function getBotIssue() {
+              const { data } = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: botIssueNumber
+              });
+              return data;
+            }
 
-              if (s === 'enable') return { type: 'enable' };
-              if (s === 'disable') return { type: 'disable' };
+            async function updateBotIssueBody(newBody) {
+              await github.rest.issues.update({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: botIssueNumber,
+                body: newBody
+              });
+            }
 
-              const m = s.match(/^sleep\s+(\d+)\s*h$/);
+            async function postSlack(text) {
+              const res = await fetch(slackWebhook, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text })
+              });
+              if (!res.ok) {
+                const t = await res.text().catch(() => "");
+                throw new Error(`Slack webhook failed: ${res.status} ${t}`);
+              }
+            }
+
+            function parseCommand(raw) {
+              const body = (raw || "").trim();
+              const lower = body.toLowerCase();
+
+              // enable / disable
+              if (lower === "enable" || lower === "on") return { kind: "enable" };
+              if (lower === "disable" || lower === "off") return { kind: "disable" };
+
+              const m = lower.match(/^sleep\s+(\d+)\s*([hm])$/);
               if (m) {
-                const hours = parseInt(m[1], 10);
-                if (Number.isFinite(hours) && hours > 0 && hours <= 168) { 
-                  return { type: 'sleep', hours };
+                const n = Number(m[1]);
+                const unit = m[2];
+                if (Number.isFinite(n) && n > 0) {
+                  const ms = unit === "h" ? n * 3600_000 : n * 60_000;
+                  return { kind: "sleep", ms };
                 }
               }
               return null;
             }
 
-            async function postSlack(text) {
-              if (!slackWebhook) {
-                core.warning('SLACK_WEBHOOK_URL is not set. Skipping Slack post.');
+            const kst = nowKST();
+            const minutes = kst.getMinutes();
+
+            const issue = await getBotIssue();
+            const currentBody = issue.body || "";
+            let state = extractState(currentBody) || defaultState();
+
+            if (context.eventName === "issue_comment") {
+              const commentBody = context.payload.comment?.body || "";
+              const cmd = parseCommand(commentBody);
+
+              if (!cmd) {
+                core.info("No recognized command in comment. Supported: enable | disable | sleep 8h | sleep 30m");
                 return;
               }
-              const res = await fetch(slackWebhook, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ text })
-              });
-              if (!res.ok) {
-                const body = await res.text().catch(() => '');
-                throw new Error(`Slack webhook failed: ${res.status} ${res.statusText} ${body}`);
-              }
-            }
 
-            const issue = await github.rest.issues.get({
-              owner, repo, issue_number
-            });
-
-            let body = issue.data.body || '';
-            let state = parseStateFromBody(body);
-
-            const commentsResp = await github.rest.issues.listComments({
-              owner, repo, issue_number, per_page: 100, sort: 'created', direction: 'asc'
-            });
-
-            const comments = commentsResp.data || [];
-
-            let lastCmd = null;
-            let lastCmdCommentId = state.lastProcessedCommentId;
-
-            for (const c of comments) {
-              if (c.id <= state.lastProcessedCommentId) continue;
-              const cmd = parseCommand(c.body || '');
-              if (cmd) {
-                lastCmd = { cmd, commentId: c.id, user: c.user?.login || 'unknown' };
-                lastCmdCommentId = c.id;
-              }
-            }
-
-            const nowMs = Date.now();
-
-            let stateChanged = false;
-            let autoWake = false;
-            if (!state.enabled && state.sleepUntilMs > 0 && nowMs >= state.sleepUntilMs) {
-              state.enabled = true;
-              state.sleepUntilMs = 0;
-              stateChanged = true;
-              autoWake = true;
-            }
-
-            if (lastCmd) {
-              state.lastProcessedCommentId = lastCmd.commentId;
-
-              if (lastCmd.cmd.type === 'enable') {
+              if (cmd.kind === "enable") {
                 state.enabled = true;
-                state.sleepUntilMs = 0;
-                stateChanged = true;
-
-                await github.rest.issues.createComment({
-                  owner, repo, issue_number,
-                  body: `🍀 OK: enabled (by @${lastCmd.user})`
-                });
-
-              } else if (lastCmd.cmd.type === 'disable') {
+                state.sleepUntilEpochMs = 0;
+              } else if (cmd.kind === "disable") {
                 state.enabled = false;
-                state.sleepUntilMs = 0;
-                stateChanged = true;
-
-                await github.rest.issues.createComment({
-                  owner, repo, issue_number,
-                  body: `🍀 OK: disabled (by @${lastCmd.user})`
-                });
-
-              } else if (lastCmd.cmd.type === 'sleep') {
-                state.enabled = false;
-                state.sleepUntilMs = nowMs + lastCmd.cmd.hours * 60 * 60 * 1000;
-                stateChanged = true;
-
-                await github.rest.issues.createComment({
-                  owner, repo, issue_number,
-                  body: `🍀 OK: sleeping for ${lastCmd.cmd.hours}h (by @${lastCmd.user})`
-                });
+                state.sleepUntilEpochMs = 0;
+              } else if (cmd.kind === "sleep") {
+                state.enabled = true; 
+                state.sleepUntilEpochMs = Date.now() + cmd.ms;
               }
+
+              const newBody = upsertState(currentBody, state);
+              await updateBotIssueBody(newBody);
+
+              const untilText = (state.sleepUntilEpochMs > Date.now())
+                ? ` (sleep until ${new Date(state.sleepUntilEpochMs).toISOString()})`
+                : "";
+
+              await postSlack(`🍀 change status : enabled=${state.enabled}, sleepUntilEpochMs=${state.sleepUntilEpochMs}${untilText}`);
+              return;
             }
 
-            if (autoWake) {
-              await github.rest.issues.createComment({
-                owner, repo, issue_number,
-                body: `🍀 Auto-wake: enabled (sleep finished)`
-              });
+
+            const onTenMinuteBoundary = (minutes % 10 === 0);
+
+            if (state.sleepUntilEpochMs > 0 && Date.now() >= state.sleepUntilEpochMs) {
+              state.sleepUntilEpochMs = 0;
+              const newBody = upsertState(currentBody, state);
+              await updateBotIssueBody(newBody);
+              await postSlack(`🍀 unsleep : enabled=${state.enabled}`);
             }
 
-            if (stateChanged || !body.includes('<!--BOT_STATE-->')) {
-              const newBody = writeStateToBody(body, state);
-              await github.rest.issues.update({
-                owner, repo, issue_number,
-                body: newBody
-              });
+            const sleeping = (state.sleepUntilEpochMs > Date.now());
+
+            if (!state.enabled) {
+              core.info("Disabled: skipping");
+              return;
+            }
+            if (sleeping) {
+              core.info("Sleeping: skipping");
+              return;
+            }
+            if (!onTenMinuteBoundary) {
+              core.info("Not on 10-minute boundary: skipping");
+              return;
             }
 
-      
-            const t = nowSeoulDate();
-            const isTenMinuteBoundary = (t.mm % 10 === 0);
-
-            const sleeping = (!state.enabled) && (state.sleepUntilMs > 0) && (nowMs < state.sleepUntilMs);
-
-            if (state.enabled && !sleeping && isTenMinuteBoundary) {
-              const timeText = formatSeoul12h(t.hh, t.mm);
-              const msg = `🍀 ${timeText}`;
-              await postSlack(msg);
-              core.info(`Posted Slack: ${msg}`);
-            } else {
-              core.info(`Skip notify: enabled=${state.enabled}, sleeping=${sleeping}, mm=${t.mm}`);
-            }
+            const msgTime = format12h(kst);
+            await postSlack(`🍀 ${msgTime}`);
