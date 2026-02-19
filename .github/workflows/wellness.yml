@@ -1,0 +1,76 @@
+name: Wellness Bot
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: read
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Seoul
+      WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+      ISSUE: ${{ secrets.BOT_ISSUE_NUMBER }}
+
+    steps:
+    - name: Read state
+      id: state
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+      run: |
+        json=$(curl -s \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          https://api.github.com/repos/$REPO/issues/$ISSUE/comments)
+
+        state=$(echo "$json" | python3 - << 'PY'
+import json,sys,re,datetime
+data=json.load(sys.stdin)
+now=datetime.datetime.now()
+
+def parse(t):
+    return datetime.datetime.fromisoformat(t.replace("Z","+00:00")).astimezone()
+
+for c in sorted(data,key=lambda x:x["created_at"],reverse=True):
+    body=c["body"].lower().strip()
+    created=parse(c["created_at"])
+
+    if body.startswith("enable"):
+        m=re.search(r'(\d+)h',body)
+        if m:
+            if now >= created + datetime.timedelta(hours=int(m.group(1))):
+                print("enabled")
+            else:
+                print("disabled")
+            sys.exit(0)
+        print("enabled"); sys.exit(0)
+
+    if body.startswith("disable"):
+        print("disabled"); sys.exit(0)
+
+print("enabled")
+PY
+)
+        echo "STATE=$state" >> $GITHUB_OUTPUT
+
+    - name: Compute time
+      id: time
+      run: |
+        min=$(date '+%M')
+        hour=$(date '+%H')
+        floor=$((10*(min/10)))
+        printf -v floor "%02d" $floor
+        send_time=$(date -d "$(date '+%Y-%m-%d') $hour:$floor" '+%I:%M %p')
+        echo "SEND_TIME=$send_time" >> $GITHUB_OUTPUT
+
+    - name: Send Slack
+      if: steps.state.outputs.STATE == 'enabled'
+      run: |
+        curl -X POST -H 'Content-type: application/json' \
+        --data "{\"text\":\"🍀 ${{ steps.time.outputs.SEND_TIME }}\"}" \
+        $WEBHOOK
